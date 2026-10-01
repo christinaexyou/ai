@@ -300,6 +300,11 @@ fn register_routing_filters(registry: &mut FilterRegistry) {
     );
     register_routing_security_filter(registry, "provider_route", ProviderRouteFilter::from_config);
     register_routing_security_filter(registry, "credential_inject", CredentialInjectFilter::from_config);
+    register_routing_security_filter(
+        registry,
+        "service_account_token",
+        ServiceAccountTokenFilter::from_config,
+    );
 }
 
 /// Register a routing HTTP filter as security-critical.
