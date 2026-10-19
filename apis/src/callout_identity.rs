@@ -107,15 +107,47 @@ impl CalloutIdentity {
 }
 
 /// Compute the exact `host:port` authority used by Praxis Core's deferred-credential
-/// matcher from an operator-configured HTTP(S) URL.
+/// matcher from a configured URL.
 ///
 /// Callers invoke this during configuration and retain the result, preventing a malformed
-/// authority from degrading at request time into a silently unauthenticated callout.
-#[cfg(any(test, feature = "openai-responses"))]
-pub(crate) fn credential_authority(filter_name: &str, raw_url: &str) -> Result<String, FilterError> {
-    let url = url::Url::parse(raw_url).map_err(|error| -> FilterError {
+/// URL from degrading at request time into a silently unauthenticated callout. The scheme
+/// is not part of the result it only selects the default port when the URL omits one.
+///
+/// # Errors
+///
+/// Returns an error when `raw_url` is not a URL, has no host, uses a scheme with no known
+/// default port and no explicit port, or does not form an HTTP authority.
+pub fn credential_authority(filter_name: &str, raw_url: &str) -> Result<String, FilterError> {
+    authority_from_url(filter_name, &parse_credential_url(filter_name, raw_url)?)
+}
+
+/// Same as [`credential_authority`], restricted to `http` and `https`.
+///
+/// One parse decides both the scheme and the host:port. A scheme with a known
+/// default port, such as `ftp` or `ws`, is rejected here instead of binding an
+/// authority the callout will never resolve to.
+///
+/// # Errors
+///
+/// Returns an error when `raw_url` is not a URL, the scheme is not `http` or
+/// `https`, the URL has no host or known port, or the result is not an HTTP authority.
+pub fn http_credential_authority(filter_name: &str, raw_url: &str) -> Result<String, FilterError> {
+    let url = parse_credential_url(filter_name, raw_url)?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err(format!("{filter_name}: endpoint scheme `{}` is not http or https", url.scheme()).into());
+    }
+    authority_from_url(filter_name, &url)
+}
+
+/// Parse `raw_url` once for credential binding.
+fn parse_credential_url(filter_name: &str, raw_url: &str) -> Result<url::Url, FilterError> {
+    url::Url::parse(raw_url).map_err(|error| -> FilterError {
         format!("{filter_name}: target URL is not a valid URL for credential binding: {error}").into()
-    })?;
+    })
+}
+
+/// Host and port of an already-parsed credential URL.
+fn authority_from_url(filter_name: &str, url: &url::Url) -> Result<String, FilterError> {
     let host = url.host_str().ok_or_else(|| -> FilterError {
         format!("{filter_name}: target URL has no host for credential binding").into()
     })?;
@@ -448,6 +480,18 @@ mod tests {
             credential_authority("test", "https://münich.example/v1/files").unwrap(),
             "xn--mnich-kva.example:443"
         );
+    }
+
+    #[test]
+    fn http_credential_authority_rejects_other_schemes() {
+        assert_eq!(
+            http_credential_authority("test", "https://ogx.example/v1/files").unwrap(),
+            "ogx.example:443"
+        );
+        let err = http_credential_authority("test", "ftp://nemo.example/v1").unwrap_err();
+        assert!(err.to_string().contains("is not http or https"), "{err}");
+        let err = http_credential_authority("test", "not a url").unwrap_err();
+        assert!(err.to_string().contains("credential binding"), "{err}");
     }
 
     #[test]

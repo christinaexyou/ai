@@ -3,21 +3,31 @@
 
 # `service_account_token`
 
-Attaches a Kubernetes pod identity token to every outgoing request. See the module documentation for the full behaviour description.
+Sends the pod's Kubernetes login token only to the address configured at startup.
+
+## Configuration Notes
+
+`endpoint` is required. Praxis refuses to start if it is left out. The token goes only to the host and port in that address.
+
+Put this filter on the outbound chain, the chain Praxis uses for its own call to `NeMo`. On the chain that accepts the client's chat request, the filter removes the client's login header and never sends the pod token.
+
+If the token file is missing, empty, or too large, the call to `NeMo` is refused with status 503 and is not sent. Guardrails then fails the check, and the client sees status 500.
 
 ## Configuration
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `token_file` | string | yes | Path to the token file. Must exist and be non-empty at startup. The file is watched for changes after startup. |
-| `header` | string | no | Header to set on outgoing requests. Defaults to `Authorization`. Cannot be an internal Praxis header or a connection-level header (`host`, `content-length`, `proxy-authorization`, etc.). |
-| `prefix` | string | no | Text prepended to the token in the header value. Defaults to `"Bearer "`. Use `""` to send the raw token with no prefix. |
+| `token_file` | string | yes | Path to the token file. The file must exist and contain a token when Praxis starts. Later replacements of the file are picked up on their own. |
+| `endpoint` | string | yes | Required address of the service allowed to receive the token. Praxis refuses to start if `endpoint` is missing. Only the host and port in this address receive the token. `http` and `https` count as the same for that match, so use `https://` on the real service address in production. An `http://` call to the same host and port sends the token where anyone on the network can read it. This filter has no certificate setting. An https call checks the server certificate with the trust store loaded for the Praxis process (`SSL_CERT_FILE`, `SSL_CERT_DIR`, or the system certificate bundle). |
+| `header` | string | no | Header that carries the token on the outgoing call. Defaults to `Authorization`. Cannot be a header Praxis removes before the call leaves (`x-praxis-*`, `x-mcp-*`, `x-ext-agent-*`, `x-ext-protocol-*`) or a header that controls the connection (`host`, `content-length`, `proxy-authorization`, and similar). |
+| `prefix` | string | no | Text placed in front of the token. Defaults to `"Bearer "`. Set this to `""` to send the token by itself. |
 
 ## Example
 
 ```yaml
 filter: service_account_token
 token_file: /var/run/secrets/tokens/nemo/token
+endpoint: "https://nemo.default.svc:8443/v1/checks" # required; only this host and port receive the token
 header: Authorization   # optional, defaults to Authorization
 prefix: "Bearer "       # optional, defaults to "Bearer "
 ```
