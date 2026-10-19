@@ -24,7 +24,7 @@ use crate::{
     A2aFilter, AiGuardrailsFilter, CredentialInjectFilter, ExternalMeteringFilter, IdentityHeaderGuardFilter,
     InFlightRegistry, IntelligentRouteFilter, LlmisvcModelProviderResolverFilter, McpFilter, ModelToHeaderFilter,
     ModelToProviderFilter, PromptEnrichFilter, ProviderRouteFilter, StreamUsageInjectFilter, TimeToFirstTokenFilter,
-    TokenCountFilter, TokenUsageHeadersFilter,
+    TokenCountFilter, TokenUsageHeadersFilter, ServiceAccountTokenFilter,
 };
 
 /// Register all in-tree AI HTTP filters into `registry`.
