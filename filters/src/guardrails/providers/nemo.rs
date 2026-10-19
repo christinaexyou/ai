@@ -39,7 +39,11 @@ const OUTPUT_RAIL_TYPES: &[&str] = &["output"];
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NemoConfig {
-    /// `NeMo` endpoint URL.
+    /// Address of the `NeMo` service. Use `https://` in production. This
+    /// provider has no place to configure a certificate authority, so the call
+    /// checks the server certificate against the trust store loaded for the
+    /// Praxis process (`SSL_CERT_FILE`, `SSL_CERT_DIR`, or the system
+    /// certificate bundle).
     endpoint: String,
 
     /// Model name sent in each request. Defaults to `""` when omitted.
