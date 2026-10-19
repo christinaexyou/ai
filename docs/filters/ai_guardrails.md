@@ -23,6 +23,8 @@ When `phase.response` is enabled, Chat Completions requests with `"stream": true
 
 For `NeMo`, `provider.guardrails.config_ids` selects deployed guardrail configurations. When `provider.guardrails` is omitted, the request omits `config_ids` so the service can use its default configuration. Omit `provider.model` to leave the selected configuration's models unchanged; a non-empty value replaces or adds its main model.
 
+In production, set `provider.endpoint` to `https://`. This provider has no place to configure a certificate authority, so the call checks the server certificate against the trust store loaded for the Praxis process (`SSL_CERT_FILE`, `SSL_CERT_DIR`, or the system certificate bundle). Put the certificate that signed the server certificate into that store before Praxis starts.
+
 ## Configuration
 
 | Field | Type | Required | Description |
@@ -42,7 +44,7 @@ filter: ai_guardrails
 outbound_chain: nemo-outbound # optional
 provider:
   type: nemo
-  endpoint: "http://nemo:8000/v1/checks"
+  endpoint: "https://nemo.default.svc:8443/v1/checks"
   guardrails:
     config_ids: ["your-config"]
   timeout_ms: 5000
