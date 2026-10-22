@@ -3,9 +3,8 @@
 
 //! Intelligent routing filters.
 //!
-//! Provides the edge `intelligent_route` filter, the provider-side
-//! `provider_route` and `credential_inject` filters, and the
-//! destination-bound `service_account_token` filter. These belong in
+//! Provides the edge `intelligent_route` filter and the provider-side
+//! `provider_route` and `credential_inject` filters. These belong in
 //! the AI proxy because they encode AI-specific routing contracts, not
 //! generic Praxis proxy mechanics.
 
@@ -18,9 +17,7 @@ pub(crate) mod metrics;
 pub(crate) mod overlay;
 pub(crate) mod picker;
 mod provider_route;
-mod service_account_token;
 
 pub use credential_inject::CredentialInjectFilter;
 pub use intelligent_route::IntelligentRouteFilter;
 pub use provider_route::ProviderRouteFilter;
-pub use service_account_token::ServiceAccountTokenFilter;

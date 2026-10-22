@@ -6,9 +6,8 @@
 # guardrails cannot evaluate SSE responses.
 # This config is used by integration tests to verify response-phase behavior in isolation.
 #
-# The nemo-outbound chain authenticates NeMo callouts with a Kubernetes
-# projected `serviceAccountToken` volume; see nemo-guardrails.yaml for
-# the full explanation and the Pod spec needed to project the token.
+# NeMo is called with no credentials. When kube-rbac-proxy protects NeMo,
+# use nemo-guardrails-service-account.yaml.
 #
 #   Response phase:
 #     passed   - response forwarded to the client unchanged

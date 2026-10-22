@@ -97,12 +97,19 @@ const STREAMING_RESPONSE_GUARDRAIL_ERROR: &str =
 /// `provider.model` to leave the selected configuration's models unchanged;
 /// a non-empty value replaces or adds its main model.
 ///
-/// In production, set `provider.endpoint` to `https://`. This provider has no
-/// place to configure a certificate authority, so the call checks the server
-/// certificate against the trust store loaded for the Praxis process
-/// (`SSL_CERT_FILE`, `SSL_CERT_DIR`, or the system certificate bundle). Put
-/// the certificate that signed the server certificate into that store before
-/// Praxis starts.
+/// In production, set `provider.endpoint` to `https://`. Set
+/// `provider.tls.ca_file` to the PEM bundle that signed the `NeMo` server
+/// certificate. That bundle is this peer's trust store, and hostname
+/// verification stays enabled. Without it, the call uses the trust store
+/// loaded for the Praxis process.
+///
+/// `provider.token_file` is optional. When set, Praxis reads that Kubernetes
+/// login token at startup and sends it on the call to this `NeMo` address.
+/// The token is not on the request the outbound chain sees. Praxis adds
+/// `Authorization` after that chain runs, so a filter there cannot remove or
+/// replace it. An `http` endpoint is refused unless its host is loopback.
+/// A missing file refuses to start. If the file later disappears, the `NeMo`
+/// call is refused and the chat is not sent to the model.
 ///
 /// # YAML configuration
 ///
@@ -114,6 +121,8 @@ const STREAMING_RESPONSE_GUARDRAIL_ERROR: &str =
 ///   endpoint: "https://nemo.default.svc:8443/v1/checks"
 ///   guardrails:
 ///     config_ids: ["your-config"]
+///   tls:
+///     ca_file: /var/run/secrets/nemo/ca.crt
 ///   timeout_ms: 5000
 /// phase:
 ///   request: true
