@@ -4,9 +4,9 @@
 //! Integration tests for `nemo-guardrails-service-account.yaml`.
 //!
 //! The base NeMo examples call the service with no credentials. This
-//! config puts `service_account_token` on the NeMo outbound chain. The
-//! token file in the example is a pod path, so each test that starts
-//! the proxy points that field at a temp file first.
+//! config sets `token_file` on the NeMo provider. The token file in the
+//! example is a pod path, so each test that starts the proxy points that
+//! field at a temp file first.
 
 use std::{
     collections::HashMap,
@@ -32,6 +32,15 @@ fn service_account_example_parses() {
         HashMap::from([("127.0.0.1:3000", 29990_u16), ("127.0.0.1:3001", 29991_u16)]),
     );
     assert_eq!(config.listeners.len(), 1);
+    let mut config = config;
+    let token_file = provider_config(&mut config)
+        .get(serde_yaml::Value::from("token_file"))
+        .and_then(serde_yaml::Value::as_str)
+        .expect("the NeMo provider should name a token file");
+    assert!(
+        token_file.contains("/var/run/secrets/tokens/nemo/token"),
+        "the example should point at the mounted pod token, got {token_file}"
+    );
     let outbound = config
         .filter_chains
         .iter()
@@ -41,8 +50,8 @@ fn service_account_example_parses() {
         outbound
             .filters
             .iter()
-            .any(|entry| entry.filter_type == "service_account_token"),
-        "the token filter belongs on this example, not the anonymous NeMo configs"
+            .all(|entry| entry.filter_type != "service_account_token"),
+        "the login token is attached by the NeMo provider"
     );
 }
 
@@ -74,10 +83,10 @@ fn service_account_token_replaces_caller_authorization() {
     );
 }
 
-/// A token endpoint on a different host:port must not attach the credential.
-/// The callout still runs; only the matching authority receives the token.
+/// A filter on the outbound chain that replaces `Authorization` still loses.
+/// The pod token is written after that chain runs.
 #[test]
-fn service_account_token_withheld_when_callout_authority_differs() {
+fn outbound_chain_cannot_replace_service_account_token() {
     let backend = start_backend_with_shutdown("ok");
     let nemo = StatefulCapturingBackend::new(vec![(200, r#"{"status":"passed","content":"safe"}"#.to_owned())])
         .start_with_shutdown();
@@ -87,7 +96,7 @@ fn service_account_token_withheld_when_callout_authority_differs() {
         HashMap::from([("127.0.0.1:3000", backend.port()), ("127.0.0.1:3001", nemo.port())]),
         "sa-jwt\n",
     );
-    set_token_endpoint(&mut config, "http://127.0.0.1:9/v1/checks");
+    replace_authorization_on_outbound(&mut config);
     let proxy = start_proxy(&config);
     let raw = chat_with_caller_secret(proxy.addr());
     assert_eq!(praxis_test_utils::parse_status(&raw), 200, "{raw}");
@@ -95,21 +104,13 @@ fn service_account_token_withheld_when_callout_authority_differs() {
     let requests = nemo.requests();
     assert_eq!(requests.len(), 1, "NeMo should receive exactly one callout");
     assert!(
-        requests[0]
-            .headers
-            .lines()
-            .any(|line| line.to_ascii_lowercase().starts_with("x-request-id: ")),
-        "the outbound chain must still run when the token is withheld: {}",
+        bearer_token(&requests[0].headers, "sa-jwt"),
+        "the pod token must survive an outbound filter that replaces Authorization: {}",
         requests[0].headers
     );
     assert!(
-        !has_authorization(&requests[0].headers),
-        "a callout to a different host:port must not carry the token: {}",
-        requests[0].headers
-    );
-    assert!(
-        !requests[0].headers.contains("sa-jwt") && !requests[0].headers.contains("client-secret"),
-        "neither the service account token nor the caller secret may reach NeMo: {}",
+        !requests[0].headers.contains("stolen"),
+        "the outbound chain must not be able to choose the Authorization value: {}",
         requests[0].headers
     );
 }
@@ -288,12 +289,6 @@ fn bearer_token(headers: &str, token: &str) -> bool {
     headers.lines().any(|line| line.eq_ignore_ascii_case(&expected))
 }
 
-fn has_authorization(headers: &str) -> bool {
-    headers
-        .lines()
-        .any(|line| line.to_ascii_lowercase().starts_with("authorization:"))
-}
-
 fn write_token_file(contents: &str) -> (TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("create tempdir for service account token");
     let path = dir.path().join("token");
@@ -301,32 +296,49 @@ fn write_token_file(contents: &str) -> (TempDir, PathBuf) {
     (dir, path)
 }
 
-fn token_config(config: &mut praxis_core::config::Config) -> &mut serde_yaml::Mapping {
+fn provider_config(config: &mut praxis_core::config::Config) -> &mut serde_yaml::Mapping {
+    let chain = config
+        .filter_chains
+        .iter_mut()
+        .find(|chain| chain.name == "nemo-guardrails")
+        .expect("example should define the main guardrails chain");
+    let filter = chain
+        .filters
+        .iter_mut()
+        .find(|entry| entry.filter_type == "ai_guardrails")
+        .expect("example should define ai_guardrails");
+    filter
+        .config
+        .as_mapping_mut()
+        .expect("guardrails config should be a mapping")
+        .get_mut(serde_yaml::Value::from("provider"))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .expect("NeMo provider config should be a mapping")
+}
+
+fn replace_authorization_on_outbound(config: &mut praxis_core::config::Config) {
     let outbound = config
         .filter_chains
         .iter_mut()
         .find(|chain| chain.name == "nemo-outbound")
         .expect("example should define the nemo-outbound chain");
-    let filter = outbound
-        .filters
-        .iter_mut()
-        .find(|entry| entry.filter_type == "service_account_token")
-        .expect("example should configure service_account_token on the outbound chain");
-    filter
-        .config
-        .as_mapping_mut()
-        .expect("service_account_token config should be a mapping")
+    let strip: praxis_core::config::FilterEntry = serde_yaml::from_str(
+        r#"
+filter: headers
+request_set:
+  - name: authorization
+    value: Bearer stolen
+"#,
+    )
+    .expect("headers filter should parse");
+    outbound.filters.insert(0, strip);
 }
 
 fn set_token_file(config: &mut praxis_core::config::Config, path: &Path) {
-    token_config(config).insert(
+    provider_config(config).insert(
         serde_yaml::Value::from("token_file"),
         serde_yaml::Value::from(path.to_str().expect("tempdir path must be valid UTF-8")),
     );
-}
-
-fn set_token_endpoint(config: &mut praxis_core::config::Config, endpoint: &str) {
-    token_config(config).insert(serde_yaml::Value::from("endpoint"), serde_yaml::Value::from(endpoint));
 }
 
 fn load_with_token(
