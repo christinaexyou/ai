@@ -10,6 +10,7 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Method};
 use praxis_ai_apis::{
     callout_target::{AddressPolicy, validate_configured_http_target, validate_resolved_addrs},
+    credential_source::{self, CredentialSource, DiagnosticContext, SecretHandle, WatchHandle},
     subrequest::{SubRequest, SubRequestClient, SubResponse},
 };
 use praxis_core::connectivity::{PreparedTarget, UrlResolutionPolicy, UrlTargetError, prepare_url_target_with_policy};
@@ -67,14 +68,15 @@ struct NemoConfig {
     #[serde(default)]
     tls: Option<NemoTls>,
 
-    /// Path to a Kubernetes login token.
+    /// Path to a Kubernetes service account token.
     ///
     /// When set, each call to this `NeMo` address sends `Authorization: Bearer`
     /// with the current token. The file is read at startup and refreshed when
     /// Kubernetes rotates it. The token is added after the outbound chain
     /// runs, so a filter on that chain cannot remove it. An `http` endpoint is
-    /// refused unless its host is loopback. A missing file refuses to start.
-    /// If the file later disappears, the `NeMo` call is refused.
+    /// refused unless its host is loopback. A file that is missing, empty, or
+    /// not a valid header value refuses to start. If a later reload fails, the
+    /// `NeMo` call is refused and handled as a provider error.
     #[serde(default)]
     token_file: Option<String>,
 }
@@ -169,14 +171,16 @@ pub(in crate::guardrails) struct NemoProvider {
     /// the endpoint host.
     ca: Option<CachedClusterTls>,
 
-    /// Login token staged onto each call when `token_file` is set.
+    /// Service account token staged onto each call when `token_file` is set.
     service_account: Option<NemoServiceAccount>,
 }
 
-/// Pod login token and the `NeMo` host:port allowed to receive it.
+/// Pod service account token and the `NeMo` host:port allowed to receive it.
 struct NemoServiceAccount {
-    /// Current token. An empty snapshot refuses the call.
-    token: crate::service_account_token::ServiceAccountToken,
+    /// Pre-assembled `Bearer` header value. An empty snapshot refuses the call.
+    header: SecretHandle,
+    /// Keeps the token file watcher alive while this provider exists.
+    _watch: Option<WatchHandle>,
     /// Exact `host:port` the executor resolves for `provider.endpoint`.
     authority: String,
 }
@@ -358,7 +362,7 @@ impl NemoProvider {
 // Private Utilities
 // -----------------------------------------------------------------------------
 
-/// Load the provider CA and login token named in the config.
+/// Load the provider CA and service account token named in the config.
 ///
 /// # Errors
 ///
@@ -374,16 +378,33 @@ fn load_peer_material(cfg: &NemoConfig) -> Result<(Option<CachedClusterTls>, Opt
         None => None,
     };
     let service_account = match cfg.token_file.as_deref() {
-        Some(path) => {
-            require_token_transport(&cfg.endpoint)?;
-            Some(NemoServiceAccount {
-                token: crate::service_account_token::ServiceAccountToken::open(std::path::Path::new(path))?,
-                authority: praxis_ai_apis::credential_authority("ai_guardrails (nemo)", &cfg.endpoint)?,
-            })
-        },
+        Some(path) => Some(open_service_account(path, &cfg.endpoint)?),
         None => None,
     };
     Ok((ca, service_account))
+}
+
+/// Read and watch `token_file`, publishing it as a `Bearer` header value.
+///
+/// # Errors
+///
+/// Returns [`FilterError`] when the endpoint cannot carry a token, or when the
+/// file is missing, empty, oversized, or does not form a valid header value.
+fn open_service_account(token_file: &str, endpoint: &str) -> Result<NemoServiceAccount, FilterError> {
+    require_token_transport(endpoint)?;
+    let authority = praxis_ai_apis::credential_authority("ai_guardrails (nemo)", endpoint)?;
+    let ctx = DiagnosticContext {
+        owner: "ai_guardrails (nemo)",
+        reference: None,
+    };
+    let source = CredentialSource::File(token_file.to_owned());
+    let transform = credential_source::bearer_header("ai_guardrails (nemo)", "token_file");
+    let (header, watch) = credential_source::build_one(ctx, &source, transform)?;
+    Ok(NemoServiceAccount {
+        header,
+        _watch: watch,
+        authority,
+    })
 }
 
 /// Reject `tls.ca_file` on a plaintext endpoint.
@@ -400,7 +421,7 @@ fn require_https_for_ca(endpoint: &str) -> Result<(), FilterError> {
     Err("ai_guardrails (nemo): 'tls.ca_file' requires an https endpoint".into())
 }
 
-/// Reject a login token on plaintext except for a loopback host.
+/// Reject a service account token on plaintext except for a loopback host.
 ///
 /// # Errors
 ///
@@ -624,12 +645,7 @@ fn build_request<'a>(
     })
 }
 
-/// `Authorization` value for a pod login token.
-fn bearer_authorization(token: &str) -> String {
-    format!("Bearer {token}")
-}
-
-/// Stage the login token for injection after the outbound chain.
+/// Stage the service account token for injection after the outbound chain.
 ///
 /// The executor writes `Authorization` only once the dial is pinned to
 /// `authority`. The header is not on the request that chain sees, so a filter
@@ -638,8 +654,8 @@ fn bearer_authorization(token: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`FilterError`] when a token file is configured and the current
-/// token is missing or is not a valid header value.
+/// Returns [`FilterError`] when a token file is configured and the latest
+/// reload produced no usable token.
 fn stage_service_account_token(
     account: Option<&NemoServiceAccount>,
     extensions: &mut RequestExtensions,
@@ -647,15 +663,12 @@ fn stage_service_account_token(
     let Some(account) = account else {
         return Ok(());
     };
-    let Some(value) = account.token.current() else {
+    let snapshot = account.header.current();
+    let Some(value) = snapshot.payload.as_deref() else {
         tracing::debug!("ai_guardrails (nemo): service account token unavailable");
         return Err("ai_guardrails (nemo): service account token unavailable".into());
     };
-    let credential = DeferredCredential::new(
-        &account.authority,
-        http::header::AUTHORIZATION,
-        bearer_authorization(value.as_str()),
-    )?;
+    let credential = DeferredCredential::new(&account.authority, http::header::AUTHORIZATION, value.as_str())?;
     let mut pending = PendingCredentials::new();
     pending.push(credential);
     extensions.insert(pending);
@@ -744,34 +757,57 @@ fn map_nemo_response(nemo: NemoResponse) -> Result<NemoVerdict, FilterError> {
     clippy::unwrap_used,
     clippy::str_to_string,
     clippy::indexing_slicing,
-    clippy::disallowed_methods,
     reason = "tests"
 )]
 mod tests {
+    use zeroize::Zeroizing;
+
     use super::{super::MessageRedaction, *};
 
-    fn open_account(contents: &str) -> (tempfile::TempDir, NemoServiceAccount) {
+    fn fixed_account(payload: Option<&str>) -> NemoServiceAccount {
+        NemoServiceAccount {
+            header: SecretHandle::new(credential_source::SecretSnapshot {
+                payload: payload.map(|value| Zeroizing::new(value.to_owned())),
+            }),
+            _watch: None,
+            authority: "127.0.0.1:3001".to_owned(),
+        }
+    }
+
+    fn write_token(contents: &str) -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("token");
         std::fs::write(&path, contents).unwrap();
-        let account = NemoServiceAccount {
-            token: crate::service_account_token::ServiceAccountToken::open(&path).unwrap(),
-            authority: "127.0.0.1:3001".to_owned(),
-        };
-        (dir, account)
+        (dir, path.to_str().unwrap().to_owned())
     }
 
     #[test]
-    fn configured_token_is_staged_off_the_chain_request() {
-        let (_dir, account) = open_account("sa-jwt\n");
-        let request = build_request("", &[], GuardPhase::Request, None).unwrap();
+    fn available_token_is_staged_as_a_deferred_credential() {
+        let account = fixed_account(Some("Bearer sa-jwt"));
         let mut extensions = RequestExtensions::default();
         stage_service_account_token(Some(&account), &mut extensions).unwrap();
-        assert!(request.headers.get(http::header::AUTHORIZATION).is_none());
         let pending = extensions.get::<PendingCredentials>().unwrap();
         assert!(!pending.is_empty(), "credential staged");
+    }
+
+    #[test]
+    fn token_file_is_published_as_a_bearer_header_value() {
+        let (_dir, path) = write_token("sa-jwt\n");
+        let account = open_service_account(&path, "http://127.0.0.1:3001/v1/checks").unwrap();
+        assert_eq!(
+            account.header.current().payload.as_deref().map(String::as_str),
+            Some("Bearer sa-jwt")
+        );
         assert_eq!(account.authority, "127.0.0.1:3001");
-        assert_eq!(bearer_authorization("sa-jwt"), "Bearer sa-jwt");
+    }
+
+    #[test]
+    fn token_that_cannot_be_a_header_value_is_rejected_at_startup() {
+        let (_dir, path) = write_token("sa\u{7f}jwt\n");
+        let err = open_service_account(&path, "http://127.0.0.1:3001/v1/checks")
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("not a valid header value"), "{err}");
     }
 
     #[test]
@@ -794,13 +830,7 @@ mod tests {
 
     #[test]
     fn unavailable_token_refuses_the_call() {
-        let (dir, account) = open_account("sa-jwt\n");
-        std::fs::remove_file(dir.path().join("token")).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while account.token.current().is_some() {
-            assert!(Instant::now() < deadline, "token was not cleared");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        let account = fixed_account(None);
         let mut extensions = RequestExtensions::default();
         let err = stage_service_account_token(Some(&account), &mut extensions).unwrap_err();
         assert!(err.to_string().contains("unavailable"), "{err}");

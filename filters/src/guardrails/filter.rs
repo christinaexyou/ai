@@ -104,12 +104,15 @@ const STREAMING_RESPONSE_GUARDRAIL_ERROR: &str =
 /// loaded for the Praxis process.
 ///
 /// `provider.token_file` is optional. When set, Praxis reads that Kubernetes
-/// login token at startup and sends it on the call to this `NeMo` address.
-/// The token is not on the request the outbound chain sees. Praxis adds
-/// `Authorization` after that chain runs, so a filter there cannot remove or
-/// replace it. An `http` endpoint is refused unless its host is loopback.
-/// A missing file refuses to start. If the file later disappears, the `NeMo`
-/// call is refused and the chat is not sent to the model.
+/// service account token at startup and sends it on the call to this `NeMo`
+/// address. The token is not on the request the outbound chain sees. Praxis
+/// adds `Authorization` after that chain runs, so a filter there cannot
+/// remove or replace it. An `http` endpoint is refused unless its host is
+/// loopback. A file that is missing, empty, or not a valid header value
+/// refuses to start. If the file later becomes unreadable, the `NeMo` call is
+/// refused and handled as a provider error: with the default
+/// `failure_mode: closed` the chat is rejected, and with `failure_mode: open`
+/// it is forwarded unscreened.
 ///
 /// # YAML configuration
 ///

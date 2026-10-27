@@ -51,7 +51,7 @@ fn service_account_example_parses() {
             .filters
             .iter()
             .all(|entry| entry.filter_type != "service_account_token"),
-        "the login token is attached by the NeMo provider"
+        "the service account token is attached by the NeMo provider"
     );
 }
 

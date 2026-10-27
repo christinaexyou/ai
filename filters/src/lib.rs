@@ -28,7 +28,6 @@ mod opentelemetry;
 pub mod prompt_enrich;
 mod register;
 pub mod routing;
-mod service_account_token;
 #[cfg(feature = "store")]
 mod store_readiness;
 mod time_to_first_token;
