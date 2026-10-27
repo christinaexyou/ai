@@ -21,6 +21,8 @@ A provider `modified` verdict on the request rewrites each targeted user message
 
 When `phase.response` is enabled, Chat Completions requests with `"stream": true` are rejected with HTTP 422 until incremental SSE response evaluation is supported (see #1108).
 
+The response phase screens only 2xx responses to requests that carried a body. Responses to bodyless requests (for example `GET /v1/models`) and non-2xx responses are forwarded unevaluated, with their original status and body, so upstream errors and management endpoints sharing the listener still reach the client.
+
 For `NeMo`, `provider.guardrails.config_ids` selects deployed guardrail configurations. When `provider.guardrails` is omitted, the request omits `config_ids` so the service can use its default configuration. Omit `provider.model` to leave the selected configuration's models unchanged; a non-empty value replaces or adds its main model.
 
 In production, set `provider.endpoint` to `https://`. Set `provider.tls.ca_file` to the PEM bundle that signed the `NeMo` server certificate. That bundle is this peer's trust store, and hostname verification stays enabled. Without it, the call uses the trust store loaded for the Praxis process.

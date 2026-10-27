@@ -34,6 +34,16 @@ const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
 const STREAMING_RESPONSE_GUARDRAIL_ERROR: &str =
     "ai_guardrails: streaming responses are not supported while a response guardrail is active";
 
+/// Per-request response-phase decision, kept in filter state so it survives
+/// `ExtProc` phase boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ResponseScreening {
+    /// The request carried a body, so a 2xx response is model output.
+    Screen,
+    /// The response is not model output and is forwarded unevaluated.
+    Skip,
+}
+
 // -----------------------------------------------------------------------------
 // AiGuardrailsFilter
 // -----------------------------------------------------------------------------
@@ -90,6 +100,12 @@ const STREAMING_RESPONSE_GUARDRAIL_ERROR: &str =
 /// When `phase.response` is enabled, Chat Completions requests with
 /// `"stream": true` are rejected with HTTP 422 until incremental SSE
 /// response evaluation is supported (see #1108).
+///
+/// The response phase screens only 2xx responses to requests that carried a
+/// body. Responses to bodyless requests (for example `GET /v1/models`) and
+/// non-2xx responses are forwarded unevaluated, with their original status
+/// and body, so upstream errors and management endpoints sharing the
+/// listener still reach the client.
 ///
 /// For `NeMo`, `provider.guardrails.config_ids` selects deployed guardrail
 /// configurations. When `provider.guardrails` is omitted, the request omits
@@ -332,6 +348,11 @@ impl HttpFilter for AiGuardrailsFilter {
             return Ok(FilterAction::Continue);
         }
 
+        if !response_is_model_output(ctx) {
+            ctx.insert_filter_state(ResponseScreening::Skip);
+            return Ok(FilterAction::Continue);
+        }
+
         if is_event_stream(ctx) {
             return Ok(FilterAction::Reject(
                 Rejection::status(502).with_body(STREAMING_RESPONSE_GUARDRAIL_ERROR),
@@ -382,6 +403,10 @@ impl HttpFilter for AiGuardrailsFilter {
     ) -> Result<FilterAction, FilterError> {
         if !end_of_stream {
             return Ok(FilterAction::Continue);
+        }
+
+        if self.phase.response && body.as_ref().is_some_and(|bytes| !bytes.is_empty()) {
+            ctx.insert_filter_state(ResponseScreening::Screen);
         }
 
         #[cfg(feature = "openai-responses")]
@@ -459,6 +484,10 @@ impl HttpFilter for AiGuardrailsFilter {
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         if !end_of_stream || !self.phase.response {
+            return Ok(FilterAction::Continue);
+        }
+
+        if ctx.get_filter_state::<ResponseScreening>() == Some(&ResponseScreening::Skip) {
             return Ok(FilterAction::Continue);
         }
 
@@ -980,6 +1009,20 @@ fn extract_response_messages(body: &Bytes) -> Result<Vec<serde_json::Value>, Fil
     }
 
     Err("ai_guardrails: response body does not contain recognizable choices".into())
+}
+
+/// Whether the response is model output the response phase must screen: a 2xx
+/// answer to a request that carried a body.
+///
+/// Bodyless requests such as `GET /v1/models` cannot carry a prompt, and error
+/// statuses carry upstream diagnostics rather than a completion.
+fn response_is_model_output(ctx: &HttpFilterContext<'_>) -> bool {
+    let request_had_body = ctx.get_filter_state::<ResponseScreening>() == Some(&ResponseScreening::Screen);
+    let success = ctx
+        .response_header
+        .as_ref()
+        .is_some_and(|response| response.status.is_success());
+    request_had_body && success
 }
 
 /// Whether the upstream response has a `text/event-stream` content type.
